@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  db:
+    image: mysql:8.0
+    container_name: mysql_container
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: admin
+      MYSQL_DATABASE: cms
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+  app:
+    build: .
+    container_name: fastapi_app
+    depends_on:
+      - db
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: mysql+pymysql://root:admin@db/cms
+      SECRET_KEY: your_secret_key_here
+
+volumes:
+  mysql_data:
