@@ -23,6 +23,8 @@ services:
     environment:
       DATABASE_URL: mysql+pymysql://root:admin@db/cms
       SECRET_KEY: your_secret_key_here
+    volumes:
+      - .:/cms_1  # Mounts your current code to the container
 
 volumes:
-  mysql_data:
+  mysql_data: {}

@@ -4,6 +4,8 @@ from models.sub_category_model import SubCategory as subcategory
 from models.product_model import Product as product
 from models.manufacturer_model import Manufacturer as manufacturer
 from models.price_model import Price as price
+from sqlalchemy.orm import Session
+from datetime import datetime, timedelta
 
 def get_filtered_data(db: Session, filters: dict):
     query = db.query(price, manufacturer, product, subcategory, category)
@@ -36,3 +38,50 @@ def get_filtered_data(db: Session, filters: dict):
             "category": row[4].name
         } for row in results
     ]
+# date type condition
+def get_date_range_from_type(date_type: str):
+    today = datetime.today()
+    current_year = today.year
+    current_month = today.month
+
+    if date_type.upper() == "MTD":
+        start = today.replace(day=1)
+        end = today
+
+    elif date_type.upper() == "QTD":
+        quarter = (current_month - 1) // 3 + 1
+        start = datetime(current_year, 3 * (quarter - 1) + 1, 1)
+        end = today
+
+    elif date_type.upper() == "Q1":
+        start = datetime(current_year, 1, 1)
+        end = datetime(current_year, 3, 31)
+
+    elif date_type.upper() == "Q2":
+        start = datetime(current_year, 4, 1)
+        end = datetime(current_year, 6, 30)
+
+    elif date_type.upper() == "Q3":
+        start = datetime(current_year, 7, 1)
+        end = datetime(current_year, 9, 30)
+
+    elif date_type.upper() == "Q4":
+        start = datetime(current_year, 10, 1)
+        end = datetime(current_year, 12, 31)
+
+    elif date_type.lower() == "last_week":
+        end = today
+        start = today - timedelta(days=7)
+
+    elif date_type.lower() == "last_month":
+        end = today
+        start = today - timedelta(days=30)
+    
+    elif date_type.lower() == "current_day":
+        start = today
+        end = today
+
+    else:
+        return None, None
+
+    return start, end

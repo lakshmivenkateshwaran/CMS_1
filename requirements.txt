@@ -9,4 +9,6 @@ python-jose[cryptography]
 python-dotenv
 pyjwt
 fastapi-mail
+reportlab
+openpyxl
 
