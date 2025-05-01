@@ -19,7 +19,7 @@ from sqlalchemy import func
 from datetime import datetime, date, timedelta
 from databases.database import get_db
 from services.addreport_services import get_filtered_data, get_date_range_from_type
-from services.email_util import send_email_reportb 
+from services.email_util import send_email_report
 from models.chart_model import ChartType
 from models.category_model import Category
 from models.sub_category_model import SubCategory    
