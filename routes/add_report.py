@@ -268,19 +268,48 @@ def get_price_by_names(
         }
     # Special Case: If date_type is "current_day", return current price directly
     if date_type == "current_day":
-        return [
-            {
+        crawl_histories = (
+            db.query(CMSCrawlingWebsiteProductsCrawlHistory)
+            .filter(CMSCrawlingWebsiteProductsCrawlHistory.crawlWebsiteId == retailer_obj.id)
+            .filter(CMSCrawlingWebsiteProductsCrawlHistory.deleted == 0)
+            .all()
+        )
+        valid_product_ids = set()
+
+        for history in crawl_histories:
+            serialized = history.searializeProductCodes
+            for product in crawling_products:
+                pid = product.id
+                if f'i:{pid};' in serialized or f's:{len(str(pid))}:"{pid}"' in serialized:
+                    valid_product_ids.add(pid)
+        
+        # Filter crawling_products to include only those in crawl history
+        filtered_products = [p for p in crawling_products if p.id in valid_product_ids]
+
+        if not filtered_products:
+           return {
                 "country": country,
                 "category": category,
                 "subcategory": subcategory,
                 "brand": brand,
                 "model": model,
                 "retailer": retailer,
-                "price": f"${product.price:,.2f}" if product.price else "N/A",
+                "message": "No valid product found in crawl history for current day"
             }
-            for product in crawling_products
-        ]
+        return [
+           {
+            "country": country,
+            "category": category,
+            "subcategory": subcategory,
+            "brand": brand,
+            "model": model,
+            "retailer": retailer,
+            "price": f"${product.price:,.2f}" if product.price else "N/A",
+           }
 
+           for product in filtered_products
+        ]
+        
     # Step 4: Handle date filters
     if start_date and end_date:
         try:
