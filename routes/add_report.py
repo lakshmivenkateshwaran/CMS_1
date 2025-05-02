@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, Query, HTTPException, Response
 from fastapi.responses import JSONResponse
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
+from collections import defaultdict
 import json
 import csv
 import io
@@ -40,6 +41,7 @@ from models.cms_model import CMSSummaryProductModel
 from models.crawl_websites_model import CrawlingWebsite
 from models.cms_price import CMSCrawlingWebsiteProduct
 from models.cms_pricehistory import CMSProductPriceHistory
+from models.cms_crawlhistory import CMSCrawlingWebsiteProductsCrawlHistory
 from models.cms_clientreports import CMSClientReport
 from models.cms_cache import CMSCache
 from models.cms_parameters import CMSMSTParameter
@@ -199,6 +201,7 @@ def get_retailers(country_id: int, db: Session = Depends(get_db)):
 
     return [{"id": r.id, "name": r.companyName} for r in retailers]
 
+
 @router.get("/submit")
 def get_price_by_names(
     country: str = Query(...),
@@ -209,7 +212,7 @@ def get_price_by_names(
     retailer: str = Query(...),
     start_date: str = Query(None, description="Start date in YYYY-MM-DD format"),
     end_date: str = Query(None, description="End date in YYYY-MM-DD format"),
-    date_type: Optional[str] = Query(None, description="Optional date type: MTD, QTD, Q1, Q2, Q3, Q4, last_week, last_month"),
+    date_type: Optional[str] = Query(None, description="Optional date type: MTD, QTD, Q1, Q2, etc."),
     db: Session = Depends(get_db)
 ):
     # Step 1: Resolve names to codes
@@ -217,7 +220,6 @@ def get_price_by_names(
     category_obj = db.query(CMSCategory).filter(CMSCategory.sCategoryName == category).first()
     subcategory_obj = db.query(CMSSubCategory).filter(CMSSubCategory.sCatSubName == subcategory).first()
     brand_obj = db.query(CMSManufacturerBrand).filter(CMSManufacturerBrand.sBrandName == brand).first()
-    #model_obj = db.query(CMSSummaryProductModel).filter(CMSSummaryProductModel.sProductModelNo == model).first()
     retailer_obj = db.query(CrawlingWebsite).filter(CrawlingWebsite.companyName == retailer).first()
 
     if not all([country_obj, category_obj, subcategory_obj, brand_obj, retailer_obj]):
@@ -246,15 +248,15 @@ def get_price_by_names(
         }
 
     # Step 3: Use iProductCode to get products
-    products = (
+    crawling_products = (
         db.query(CMSCrawlingWebsiteProduct)
-        .filter(CMSCrawlingWebsiteProduct.systemProductId == CMSSummaryProduct.iProductCode)
+        .filter(CMSCrawlingWebsiteProduct.systemProductId == summary_product.iProductCode)
         .filter(CMSCrawlingWebsiteProduct.crawlWebsiteId == retailer_obj.id)
         .filter(CMSCrawlingWebsiteProduct.isActive == 1)
         .all()
     )
 
-    if not products:
+    if not crawling_products:
         return {
             "country": country,
             "category": category,
@@ -264,64 +266,74 @@ def get_price_by_names(
             "retailer": retailer,
             "message": "Product found in summary, but not in crawling website products"
         }
-    product_ids = [p.id for p in products]
-    # Step 4: Check if start_date and end_date are given
+    # Special Case: If date_type is "current_day", return current price directly
+    if date_type == "current_day":
+        return [
+            {
+                "country": country,
+                "category": category,
+                "subcategory": subcategory,
+                "brand": brand,
+                "model": model,
+                "retailer": retailer,
+                "price": f"${product.price:,.2f}" if product.price else "N/A",
+            }
+            for product in crawling_products
+        ]
+
+    # Step 4: Handle date filters
     if start_date and end_date:
         try:
-            # Convert to int (e.g. 20240418)
             start = int(datetime.strptime(start_date, "%Y-%m-%d").strftime("%Y%m%d"))
             end = int(datetime.strptime(end_date, "%Y-%m-%d").strftime("%Y%m%d"))
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
-
     elif date_type:
         start_dt, end_dt = get_date_range_from_type(date_type)
         if not start_dt or not end_dt:
             raise HTTPException(status_code=400, detail="Invalid date_type value")
-
         start = int(start_dt.strftime("%Y%m%d"))
         end = int(end_dt.strftime("%Y%m%d"))
-
     else:
-        # Step 5: No date filters, return latest product prices
-        return [
-            {
-                "country": country,
-                "category": category,
-                "subcategory": subcategory,
-                "brand": brand,
-                "model": model,
-                "retailer": retailer,
-                "price": f"${p.price:,.2f}"
-            }
-            for p in products
-        ]
+        raise HTTPException(status_code=400, detail="Please provide a date range or date_type to fetch price history")
 
-    # Step 6: Filter price history
-    history_prices = (
-        db.query(CMSProductPriceHistory)
-        .filter(CMSProductPriceHistory.productId.in_(product_ids))
-        .filter(CMSProductPriceHistory.crawlWebsiteId == retailer_obj.id)
-        .filter(CMSProductPriceHistory.referenceDate.between(start, end))
-        .filter(CMSProductPriceHistory.deleted == 0)
+    # Step 5: Match product IDs with crawl history via serialized codes
+    crawl_histories = (
+        db.query(CMSCrawlingWebsiteProductsCrawlHistory)
+        .filter(CMSCrawlingWebsiteProductsCrawlHistory.crawlWebsiteId == retailer_obj.id)
+        .filter(CMSCrawlingWebsiteProductsCrawlHistory.deleted == 0)
         .all()
     )
 
-    if history_prices:
-        return [
-            {
-                "country": country,
-                "category": category,
-                "subcategory": subcategory,
-                "brand": brand,
-                "model": model,
-                "retailer": retailer,
-                "price": f"${p.price:,.2f}",
-                "reference_date": datetime.strptime(str(p.referenceDate), "%Y%m%d").strftime("%d-%m-%Y")
-            }
-            for p in history_prices
-        ]
-    else:
+    matched_entries = defaultdict(list)
+
+    # Group crawl records by crawlDate where a match with product ID exists
+    for history in crawl_histories:
+        serialized = history.searializeProductCodes
+        for product in crawling_products:
+            pid = product.id
+            if f'i:{pid};' in serialized or f's:{len(str(pid))}:"{pid}"' in serialized:
+                if start <= history.crawlDate <= end:
+                    matched_entries[history.crawlDate].append({
+                        "product_id": pid,
+                        "crawl_date": history.crawlDate,
+                        "created_at": history.created
+                    })
+    
+    # Now you need to process each crawlDate and select the latest record for each one
+    final_matched_entries = []
+
+    # For each crawlDate, pick the record with latest created_at
+    for crawl_date, records in matched_entries.items():
+         latest_record = max(records, key=lambda x: x["created_at"])
+
+         # Add the latest record to final list
+         final_matched_entries.append({
+             "product_id": latest_record["product_id"],
+             "crawl_date": latest_record["crawl_date"]
+        })
+
+    if not matched_entries:
         return {
             "country": country,
             "category": category,
@@ -329,8 +341,44 @@ def get_price_by_names(
             "brand": brand,
             "model": model,
             "retailer": retailer,
-            "message": f"No price history data found for the selected time range"
+            "message": "No matching crawl history data found for the given products and date range"
         }
+
+    # Step 6: Fetch price history using matched product_ids and crawl_dates
+    prices = (
+        db.query(CMSProductPriceHistory)
+        .filter(CMSProductPriceHistory.productId.in_([e["product_id"] for e in final_matched_entries]))
+        .filter(CMSProductPriceHistory.crawlWebsiteId == retailer_obj.id)
+        .filter(CMSProductPriceHistory.referenceDate.in_([e["crawl_date"] for e in final_matched_entries]))
+        .filter(CMSProductPriceHistory.deleted == 0)
+        .all()
+    )
+
+    if not prices:
+        return {
+            "country": country,
+            "category": category,
+            "subcategory": subcategory,
+            "brand": brand,
+            "model": model,
+            "retailer": retailer,
+            "message": "No price history data found for matched crawl dates"
+        }
+
+    return [
+        {
+            "country": country,
+            "category": category,
+            "subcategory": subcategory,
+            "brand": brand,
+            "model": model,
+            "retailer": retailer,
+            "price": f"${p.price:,.2f}",
+            "reference_date": datetime.strptime(str(p.referenceDate), "%Y%m%d").strftime("%d-%m-%Y")
+        }
+        for p in prices
+    ]
+
     
 @router.get("/export-excel")
 def export_selected_data_as_excel(
@@ -781,10 +829,10 @@ def save_report_view(
     category_obj = db.query(CMSCategory).filter(CMSCategory.sCategoryName == payload.category).first()
     subcategory_obj = db.query(CMSSubCategory).filter(CMSSubCategory.sCatSubName == payload.subcategory).first()
     brand_obj = db.query(CMSManufacturerBrand).filter(CMSManufacturerBrand.sBrandName == payload.brand).first()
-    #model_obj = db.query(CMSSummaryProductModel).filter(CMSSummaryProductModel.sProductModelNo == payload.model).first()
+    model_obj = db.query(CMSSummaryProductModel).filter(CMSSummaryProductModel.sProductModelNo == payload.model).first()
     retailer_obj = db.query(CrawlingWebsite).filter(CrawlingWebsite.companyName == payload.retailer).first()
 
-    if not all([country_obj, category_obj, subcategory_obj, brand_obj, retailer_obj]):
+    if not all([country_obj, category_obj, subcategory_obj, brand_obj, retailer_obj, model_obj]):
         raise HTTPException(status_code=404, detail="One or more values not found")
     
     # Create JSON with IDs
@@ -793,9 +841,9 @@ def save_report_view(
         "category_code": category_obj.iCategoryCode,
         "subcategory_code": subcategory_obj.iCatSubCode,
         "brand_code": brand_obj.iManBrandCode,
-        #"model": model_obj.id,
+        "model": model_obj.id,
         "retailer_id": retailer_obj.id,
-        "model": payload.model,
+        "model": model_obj.id,
         "start_date": payload.start_date,
         "end_date": payload.end_date,
         "date_type": payload.date_type
@@ -820,9 +868,9 @@ def save_report_view(
         "category": category_obj.iCategoryCode,
         "subcategory": subcategory_obj.iCatSubCode,
         "brand": brand_obj.iManBrandCode,
-        #"model": model_obj.id,
+        "model": model_obj.id,
         "retailer": retailer_obj.id,
-        "model": payload.model,
+        "model": model_obj.id,
         "start_date": payload.start_date,
         "end_date": payload.end_date,
         "date_type": payload.date_type
@@ -879,6 +927,7 @@ def view_saved_report(report_id: int, db: Session = Depends(get_db), user_id: in
     category = db.query(CMSCategory).filter(CMSCategory.iCategoryCode == filters.get("category_code")).first()
     subcategory = db.query(CMSSubCategory).filter(CMSSubCategory.iCatSubCode == filters.get("subcategory_code"),CMSSubCategory.iCategoryCode == filters.get("category_code")).first()    
     brand = db.query(CMSManufacturerBrand).filter(CMSManufacturerBrand.iManBrandCode == filters.get("brand_code")).first()
+    model = db.query(CMSSummaryProductModel).filter(CMSSummaryProductModel.id == filters.get("model")).first()
     retailer = db.query(CrawlingWebsite).filter(CrawlingWebsite.id == filters.get("retailer_id")).first()
 
     readable_filters = {
@@ -887,7 +936,7 @@ def view_saved_report(report_id: int, db: Session = Depends(get_db), user_id: in
         "Subcategory": subcategory.sCatSubName if subcategory else "",
         "Brand": brand.sBrandName if brand else "",
         "Retailer": retailer.companyName if retailer else "",
-        "Model": filters.get("model"),
+        "Model": model.sProductModelNo if model else "",
         "Start Date": filters.get("start_date"),
         "End Date": filters.get("end_date"),
         "Date Type": filters.get("date_type")
@@ -928,6 +977,7 @@ def get_saved_report(report_id: int, db: Session = Depends(get_db)):
     category = db.query(CMSCategory).filter(CMSCategory.iCategoryCode == filters_json.get("category_code")).first()
     subcategory = db.query(CMSSubCategory).filter(CMSSubCategory.iCatSubCode == filters_json.get("subcategory_code"),CMSSubCategory.iCategoryCode == filters_json.get("category_code")).first()    
     brand = db.query(CMSManufacturerBrand).filter(CMSManufacturerBrand.iManBrandCode == filters_json.get("brand_code")).first()
+    model = db.query(CMSSummaryProductModel).filter(CMSSummaryProductModel.id == filters_json.get("model")).first()
     retailer = db.query(CrawlingWebsite).filter(CrawlingWebsite.id == filters_json.get("retailer_id")).first()
 
     return {
@@ -939,7 +989,7 @@ def get_saved_report(report_id: int, db: Session = Depends(get_db)):
             "subCategory": [{"id": subcategory.iCatSubCode, "name": subcategory.sCatSubName}] if subcategory else [],
             "retailer": [{"id": retailer.id, "name": retailer.companyName}] if retailer else [],
             "brand": [{"id": brand.iManBrandCode, "name": brand.sBrandName}] if brand else [],
-            "model": [filters_json.get("model")],
+            "model": [{"id": model.id, "name": model.sProductModelNo}] if model else [],
             "start_date": filters_json.get("start_date"),
             "end_date": filters_json.get("end_date"),
             "date_type": filters_json.get("date_type"),
