@@ -1,11 +1,7 @@
-<<<<<<< HEAD
+# Local ignores
 env/
 dumps/
-=======
-# These are some examples of commonly ignored file patterns.
-# You should customize this list as applicable to your project.
-# Learn more about .gitignore:
-#     https://www.atlassian.com/git/tutorials/saving-changes/gitignore
+
 
 # Node artifact files
 node_modules/
@@ -51,5 +47,3 @@ Thumbs.db
 *.flv
 *.mov
 *.wmv
-
->>>>>>> 60b1659e92c08d96611dd857662df0079d40dce9
