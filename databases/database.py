@@ -8,18 +8,7 @@ from urllib.parse import quote_plus
 # Load environment variables
 load_dotenv()
 
-# Get the database connection components from the environment variables
-db_host = os.getenv("DB_HOST")
-db_port = os.getenv("DB_PORT")
-db_name = os.getenv("DB_NAME")
-db_user = os.getenv("DB_USER")
-db_password = os.getenv("DB_PASSWORD")
-
-# URL encode the password
-encoded_password = quote_plus(db_password)
-
-#DATABASE_URL = os.getenv("DATABASE_URL")
-DATABASE_URL = f"mysql+pymysql://{db_user}:{encoded_password}@{db_host}:{db_port}/{db_name}"
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 # Database connection
 engine = create_engine(DATABASE_URL)
