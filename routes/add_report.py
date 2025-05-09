@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, Query, HTTPException, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from collections import defaultdict
@@ -439,32 +439,37 @@ def get_price_by_names(
         forward_price = product_prices.get(pid)
         history_map = full_history_prices.get(pid, {})
 
-        last_history_date = max(history_map.keys()) if history_map else None
-        last_history_price = history_map.get(last_history_date) if last_history_date else None
+        # Sort the historical dates ascending for forward lookup
+        sorted_history_dates = sorted(history_map.keys())
+        price_timeline = {}
+        last_seen_price = None
 
-        for date_obj in all_dates:
-            if date_obj > today_date:
-                continue  # Skip dates in the future
+        # Step 1: Populate known historical prices
+        for ref_date in sorted_history_dates:
+            price_timeline[ref_date] = history_map[ref_date]
+
+        # Step 2: Backfill missing dates with the last known price
+        current_idx = len(sorted_history_dates) - 1
+        for date_obj in reversed(all_dates):
             date_int = int(date_obj.strftime("%Y%m%d"))
-            display_date = date_obj.strftime("%d-%m-%Y")
+            if date_int in price_timeline:
+                last_seen_price = price_timeline[date_int]   
+            elif last_seen_price is not None and date_int < sorted_history_dates[-1]:
+                price_timeline[date_int] = last_seen_price
 
-            if date_int == last_history_date:
-                # Replace last historical date with crawling website price if available
-                if forward_price is not None:
-                    final_result.append({
-                        "country": country,
-                        "category": category,
-                        "subcategory": subcategory,
-                        "brand": brand,
-                        "model": model,
-                        "retailer": retailer,
-                        "Date": display_date,
-                        "price": f"${forward_price:,.2f}"
-                    })
+        # Step 3: Forward-fill using crawling website price
+        for date_obj in all_dates:
+            date_int = int(date_obj.strftime("%Y%m%d"))
+            if date_int > int(today_date.strftime("%Y%m%d")):
+                continue
 
-            elif date_int in history_map:
-                # Other historical dates
-                price = history_map[date_int]
+            if date_int >= crawl_date and date_int not in price_timeline and forward_price is not None:
+                price_timeline[date_int] = forward_price
+
+        # Step 4: Format results
+        for date_obj in all_dates:
+            date_int = int(date_obj.strftime("%Y%m%d"))
+            if date_int in price_timeline:
                 final_result.append({
                     "country": country,
                     "category": category,
@@ -472,163 +477,315 @@ def get_price_by_names(
                     "brand": brand,
                     "model": model,
                     "retailer": retailer,
-                    "Date": display_date,
-                    "price": f"${price:,.2f}"
-                })
-
-            elif last_history_date and date_int < last_history_date:
-                # Backfill using last known historical price
-                if last_history_price is not None:
-                    final_result.append({
-                        "country": country,
-                        "category": category,
-                        "subcategory": subcategory,
-                        "brand": brand,
-                        "model": model,
-                        "retailer": retailer,
-                        "Date": display_date,
-                        "price": f"${last_history_price:,.2f}"
-                    })
-                    
-            elif crawl_date and date_int >= crawl_date and forward_price is not None:
-                # Forward fill using crawling website price
-                final_result.append({
-                    "country": country,
-                    "category": category,
-                    "subcategory": subcategory,
-                    "brand": brand,
-                    "model": model,
-                    "retailer": retailer,
-                    "Date": display_date,
-                    "price": f"${forward_price:,.2f}"
-                })
+                    "Date": date_obj.strftime("%d-%m-%Y"),
+                    "price": f"${price_timeline[date_int]:,.2f}"
+            })
 
     return final_result
 
-
-
-    
 @router.get("/export-excel")
-def export_selected_data_as_excel(
+def get_price_by_names(
     country: str = Query(...),
     category: str = Query(...),
     subcategory: str = Query(...),
     brand: str = Query(...),
     model: str = Query(...),
     retailer: str = Query(...),
-    start_date: Optional[str] = Query(None, description="Start date in YYYY-MM-DD format"),
-    end_date: Optional[str] = Query(None, description="End date in YYYY-MM-DD format"),
-    date_type: Optional[str] = Query(None, description="Choose from QTD, MTD, Last Month, etc."),
+    start_date: str = Query(None, description="Start date in YYYY-MM-DD format"),
+    end_date: str = Query(None, description="End date in YYYY-MM-DD format"),
+    date_type: Optional[str] = Query(None, description="Optional date type: MTD, QTD, Q1, Q2, etc."),
     db: Session = Depends(get_db)
 ):
-    # Step 1: Resolve necessary objects
+    # Step 1: Resolve names to codes
     country_obj = db.query(CMSCountry).filter(CMSCountry.country == country).first()
+    category_obj = db.query(CMSCategory).filter(CMSCategory.sCategoryName == category).first()
+    subcategory_obj = db.query(CMSSubCategory).filter(CMSSubCategory.sCatSubName == subcategory).first()
+    brand_obj = db.query(CMSManufacturerBrand).filter(CMSManufacturerBrand.sBrandName == brand).first()
     retailer_obj = db.query(CrawlingWebsite).filter(CrawlingWebsite.companyName == retailer).first()
 
-    if not country_obj or not retailer_obj:
-        raise HTTPException(status_code=404, detail="Country or Retailer not found")
+    if not all([country_obj, category_obj, subcategory_obj, brand_obj, retailer_obj]):
+        raise HTTPException(status_code=404, detail="One or more values not found")
 
-    # Step 2: Resolve product summary
+    # Step 2: Match summary_products using selected filters
     summary_product = (
         db.query(CMSSummaryProduct)
-        .join(CMSCategory, CMSSummaryProduct.iProductCategoryCode == CMSCategory.iCategoryCode)
-        .join(CMSSubCategory, CMSSummaryProduct.iProductCatSubCode == CMSSubCategory.iCatSubCode)
-        .join(CMSManufacturerBrand, CMSSummaryProduct.iProductBrandCode == CMSManufacturerBrand.iManBrandCode)
-        .filter(CMSSummaryProduct.sProductModelNo == model)
-        .filter(CMSCategory.sCategoryName == category)
-        .filter(CMSSubCategory.sCatSubName == subcategory)
-        .filter(CMSManufacturerBrand.sBrandName == brand)
         .filter(CMSSummaryProduct.iProductCountryCode == country_obj.country_code)
+        .filter(CMSSummaryProduct.iProductCategoryCode == category_obj.iCategoryCode)
+        .filter(CMSSummaryProduct.iProductCatSubCode == subcategory_obj.iCatSubCode)
+        .filter(CMSSummaryProduct.sProductModelNo == model)
+        .filter(CMSSummaryProduct.iProductBrandCode == brand_obj.iManBrandCode)
         .first()
     )
 
     if not summary_product:
-        raise HTTPException(status_code=404, detail="No matching product found in summary table")
+        return {
+            "country": country,
+            "category": category,
+            "subcategory": subcategory,
+            "brand": brand,
+            "model": model,
+            "retailer": retailer,
+            "message": "Matching product not found in summary_products"
+        }
 
-    # Step 3: Get all matching products
-    products = (
+    # Step 3: Use iProductCode to get products
+    crawling_products = (
         db.query(CMSCrawlingWebsiteProduct)
-        .filter(CMSCrawlingWebsiteProduct.systemProductId == CMSSummaryProduct.iProductCode)
+        .filter(CMSCrawlingWebsiteProduct.systemProductId == summary_product.iProductCode)
         .filter(CMSCrawlingWebsiteProduct.crawlWebsiteId == retailer_obj.id)
         .filter(CMSCrawlingWebsiteProduct.isActive == 1)
         .all()
     )
 
-    if not products:
-        raise HTTPException(status_code=404, detail="No active product found to export")
+    if not crawling_products:
+        return {
+            "country": country,
+            "category": category,
+            "subcategory": subcategory,
+            "brand": brand,
+            "model": model,
+            "retailer": retailer,
+            "message": "Product found in summary, but not in crawling website products"
+        }
+    
+    # Special Case: If date_type is "current_day", return current price
+    if date_type == "current_day":
+        today_int = int(date.today().strftime("%Y%m%d"))
+        crawl_histories = (
+            db.query(CMSCrawlingWebsiteProductsCrawlHistory)
+            .filter(CMSCrawlingWebsiteProductsCrawlHistory.crawlWebsiteId == retailer_obj.id)
+            .filter(CMSCrawlingWebsiteProductsCrawlHistory.crawlDate == today_int)
+            .filter(CMSCrawlingWebsiteProductsCrawlHistory.deleted == 0)
+            .all()
+        )
+        valid_product_ids = set()
 
-    # Excel setup
+        for history in crawl_histories:
+            serialized = history.searializeProductCodes
+            for product in crawling_products:
+                pid = product.id
+                if f'i:{pid};' in serialized or f's:{len(str(pid))}:"{pid}"' in serialized:
+                    valid_product_ids.add(pid)
+        
+        # Filter crawling_products to include only those in crawl history
+        filtered_products = [p for p in crawling_products if p.id in valid_product_ids]
+
+        if not filtered_products:
+           return {
+                "country": country,
+                "category": category,
+                "subcategory": subcategory,
+                "brand": brand,
+                "model": model,
+                "retailer": retailer,
+                "message": "No valid product found in crawl history for current day"
+            }
+        return [
+           {
+            "country": country,
+            "category": category,
+            "subcategory": subcategory,
+            "brand": brand,
+            "model": model,
+            "retailer": retailer,
+            "price": f"${product.price:,.2f}" if product.price else "N/A",
+           }
+
+           for product in filtered_products
+        ]
+        
+    # Step 4: Handle date filters
+    if start_date and end_date:
+       try:
+           start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+           end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+           start = int(start_dt.strftime("%Y%m%d"))
+           end = int(end_dt.strftime("%Y%m%d"))
+       except ValueError:
+             raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+    elif date_type:
+        start_dt, end_dt = get_date_range_from_type(date_type)
+        if not start_dt or not end_dt:
+           raise HTTPException(status_code=400, detail="Invalid date_type value")
+        start = int(start_dt.strftime("%Y%m%d"))
+        end = int(end_dt.strftime("%Y%m%d"))
+    else:
+        raise HTTPException(status_code=400, detail="Please provide a date range or date_type to fetch price history")
+
+    # Step 5: Match product IDs with crawl history via serialized codes
+    crawl_histories = (
+        db.query(CMSCrawlingWebsiteProductsCrawlHistory)
+        .filter(CMSCrawlingWebsiteProductsCrawlHistory.crawlWebsiteId == retailer_obj.id)
+        .filter(CMSCrawlingWebsiteProductsCrawlHistory.deleted == 0)
+        .all()
+    )
+
+    matched_entries = defaultdict(list)
+
+    # Group crawl records by crawlDate where a match with product ID exists
+    for history in crawl_histories:
+        serialized = history.searializeProductCodes
+        for product in crawling_products:
+            pid = product.id
+            if f'i:{pid};' in serialized or f's:{len(str(pid))}:"{pid}"' in serialized:
+                if start <= history.crawlDate <= end:
+                    matched_entries[history.crawlDate].append({
+                        "product_id": pid,
+                        "crawl_date": history.crawlDate,
+                        "created_at": history.created
+                    })
+    
+    # Now you need to process each crawlDate and select the latest record for each one
+    final_matched_entries = []
+
+    # For each crawlDate, pick the record with latest created_at
+    for crawl_date, records in matched_entries.items():
+         latest_record = max(records, key=lambda x: x["created_at"])
+
+         # Add the latest record to final list
+         final_matched_entries.append({
+             "product_id": latest_record["product_id"],
+             "crawl_date": latest_record["crawl_date"]
+        })
+
+    if not matched_entries:
+        return {
+            "country": country,
+            "category": category,
+            "subcategory": subcategory,
+            "brand": brand,
+            "model": model,
+            "retailer": retailer,
+            "message": "No matching crawl history data found for the given products and date range"
+        }
+
+    # Step 6: Get all matched product IDs and latest created crawlDate per product
+    product_latest_crawl = {}
+
+    for record in final_matched_entries:
+        pid = record["product_id"]
+        crawl_date = record["crawl_date"]
+        if pid not in product_latest_crawl or product_latest_crawl[pid]["created_at"] < record.get("created_at", datetime.min):
+            product_latest_crawl[pid] = {
+                "crawl_date": crawl_date,
+                "created_at": record.get("created_at", datetime.min)
+            }
+
+    # Step 7: Get latest price history reference date per product
+    latest_price_history = (
+        db.query(CMSProductPriceHistory.productId, func.max(CMSProductPriceHistory.referenceDate).label("last_ref"))
+        .filter(CMSProductPriceHistory.productId.in_(product_latest_crawl.keys()))
+        .filter(CMSProductPriceHistory.crawlWebsiteId == retailer_obj.id)
+        .filter(CMSProductPriceHistory.deleted == 0)
+        .group_by(CMSProductPriceHistory.productId)
+        .all()
+    )
+
+    product_last_ref_date = {
+        p.productId: p.last_ref for p in latest_price_history
+    }
+
+    # Load full history for all matched products
+    full_history_prices = defaultdict(dict)
+
+    history_records = (
+        db.query(CMSProductPriceHistory)
+        .filter(CMSProductPriceHistory.productId.in_(product_latest_crawl.keys()))
+        .filter(CMSProductPriceHistory.crawlWebsiteId == retailer_obj.id)
+        .filter(CMSProductPriceHistory.deleted == 0)
+        .all()
+    )
+
+    for record in history_records:
+        full_history_prices[record.productId][record.referenceDate] = record.price
+
+
+    # Step 8: Get crawling website product prices (used for forward fill)
+    product_prices = {
+        p.id: p.price for p in crawling_products if p.price is not None
+    }
+
+    # Step 9: Build complete timeline
+    final_result = []
+    all_dates = []
+    cursor = start_dt.date()
+    while cursor <= end_dt.date():
+        all_dates.append(cursor)
+        cursor += timedelta(days=1)
+    
+    today_date = date.today()
+    for pid in product_latest_crawl.keys():
+        crawl_date = product_latest_crawl[pid]["crawl_date"]
+        forward_price = product_prices.get(pid)
+        history_map = full_history_prices.get(pid, {})
+
+        # Sort the historical dates ascending for forward lookup
+        sorted_history_dates = sorted(history_map.keys())
+        price_timeline = {}
+        last_seen_price = None
+
+        # Step 1: Populate known historical prices
+        for ref_date in sorted_history_dates:
+            price_timeline[ref_date] = history_map[ref_date]
+
+        # Step 2: Backfill missing dates with the last known price
+        current_idx = len(sorted_history_dates) - 1
+        for date_obj in reversed(all_dates):
+            date_int = int(date_obj.strftime("%Y%m%d"))
+            if date_int in price_timeline:
+                last_seen_price = price_timeline[date_int]   
+            elif last_seen_price is not None and date_int < sorted_history_dates[-1]:
+                price_timeline[date_int] = last_seen_price
+
+        # Step 3: Forward-fill using crawling website price
+        for date_obj in all_dates:
+            date_int = int(date_obj.strftime("%Y%m%d"))
+            if date_int > int(today_date.strftime("%Y%m%d")):
+                continue
+
+            if date_int >= crawl_date and date_int not in price_timeline and forward_price is not None:
+                price_timeline[date_int] = forward_price
+
+        # Step 4: Format results
+        for date_obj in all_dates:
+            date_int = int(date_obj.strftime("%Y%m%d"))
+            if date_int in price_timeline:
+                final_result.append({
+                    "country": country,
+                    "category": category,
+                    "subcategory": subcategory,
+                    "brand": brand,
+                    "model": model,
+                    "retailer": retailer,
+                    "Date": date_obj.strftime("%d-%m-%Y"),
+                    "price": f"${price_timeline[date_int]:,.2f}"
+            })
+                
+    
     wb = Workbook()
     ws = wb.active
-    ws.title = "Report"
+    ws.title = "Price Report"
 
-    # Header & Styles
-    if start_date and end_date or date_type:
-        headers = ["Country", "Category", "Subcategory", "Brand", "Model", "Retailer", "Price", "Reference Date"]
-    else:
-        headers = ["Country", "Category", "Subcategory", "Brand", "Model", "Retailer", "Price"]
-
+    headers = list(final_result[0].keys()) if final_result else []
     ws.append(headers)
+
+    # Optional styling
     header_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
     for cell in ws[1]:
         cell.font = Font(bold=True)
         cell.fill = header_fill
 
-    # Handle date type if provided
-    if date_type and not (start_date and end_date):
-        start_dt, end_dt = get_date_range_from_type(date_type)
-        if not start_dt or not end_dt:
-            raise HTTPException(status_code=400, detail="Invalid date_type provided.")
-        start_date = start_dt.strftime("%Y-%m-%d")
-        end_date = end_dt.strftime("%Y-%m-%d")
+    for row in final_result:
+        ws.append([row.get(h, "") for h in headers])
+    
+    file_name = f"price_report_{datetime.now().strftime('%Y%m%d')}.xlsx"
+    file_path = os.path.join("/tmp", file_name)
+    wb.save(file_path)
 
-    elif date_type and (start_date or end_date):
-        raise HTTPException(status_code=400, detail="Provide either date_type OR start_date/end_date — not both.")
-
-    # Step 4: Fetch price history if date filters applied
-    if start_date and end_date:
-        try:
-            start = int(datetime.strptime(start_date, "%Y-%m-%d").strftime("%Y%m%d"))
-            end = int(datetime.strptime(end_date, "%Y-%m-%d").strftime("%Y%m%d"))
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
-
-        product_ids = [p.id for p in products]
-
-        history_prices = (
-            db.query(CMSProductPriceHistory)
-            .filter(CMSProductPriceHistory.productId.in_(product_ids))
-            .filter(CMSProductPriceHistory.crawlWebsiteId == retailer_obj.id)
-            .filter(CMSProductPriceHistory.referenceDate.between(start, end))
-            .filter(CMSProductPriceHistory.deleted == 0)
-            .all()
-        )
-
-        for p in history_prices:
-            ws.append([
-                country, category, subcategory, brand, model, retailer, f"${p.price:,.2f}", datetime.strptime(str(p.referenceDate), "%Y%m%d").strftime("%d-%m-%Y")
-            ])
-
-        if not history_prices:
-            ws.append([
-                country, category, subcategory, brand, model, retailer, "N/A",
-                f"No price history found between {start_date} and {end_date}"
-            ])
-    else:
-        for product in products:
-            ws.append([
-                country, category, subcategory, brand, model, retailer, f"${product.price:,.2f}"
-            ])
-
-    # Save Excel to memory stream
-    stream = io.BytesIO()
-    wb.save(stream)
-    stream.seek(0)
-
-    return Response(
-        content=stream.read(),
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename={brand}_Report.xlsx"}
+    return FileResponse(
+        path=file_path,
+        filename=file_name,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
     
 @router.get("/export-csv")
@@ -764,7 +921,7 @@ def export_selected_data_as_csv(
     )
 
 @router.get("/export-pdf")
-def export_selected_data_as_pdf(
+def get_price_by_names(
     country: str = Query(...),
     category: str = Query(...),
     subcategory: str = Query(...),
@@ -773,43 +930,282 @@ def export_selected_data_as_pdf(
     retailer: str = Query(...),
     start_date: str = Query(None, description="Start date in YYYY-MM-DD format"),
     end_date: str = Query(None, description="End date in YYYY-MM-DD format"),
-    date_type: str = Query(None, description="Choose from QTD, MTD, Last Month, etc."),
+    date_type: Optional[str] = Query(None, description="Optional date type: MTD, QTD, Q1, Q2, etc."),
     db: Session = Depends(get_db)
 ):
+    # Step 1: Resolve names to codes
     country_obj = db.query(CMSCountry).filter(CMSCountry.country == country).first()
+    category_obj = db.query(CMSCategory).filter(CMSCategory.sCategoryName == category).first()
+    subcategory_obj = db.query(CMSSubCategory).filter(CMSSubCategory.sCatSubName == subcategory).first()
+    brand_obj = db.query(CMSManufacturerBrand).filter(CMSManufacturerBrand.sBrandName == brand).first()
     retailer_obj = db.query(CrawlingWebsite).filter(CrawlingWebsite.companyName == retailer).first()
 
-    if not country_obj or not retailer_obj:
-        raise HTTPException(status_code=404, detail="Country or Retailer not found")
+    if not all([country_obj, category_obj, subcategory_obj, brand_obj, retailer_obj]):
+        raise HTTPException(status_code=404, detail="One or more values not found")
 
+    # Step 2: Match summary_products using selected filters
     summary_product = (
         db.query(CMSSummaryProduct)
-        .join(CMSCategory, CMSSummaryProduct.iProductCategoryCode == CMSCategory.iCategoryCode)
-        .join(CMSSubCategory, CMSSummaryProduct.iProductCatSubCode == CMSSubCategory.iCatSubCode)
-        .join(CMSManufacturerBrand, CMSSummaryProduct.iProductBrandCode == CMSManufacturerBrand.iManBrandCode)
-        .filter(CMSSummaryProduct.sProductModelNo == model)
-        .filter(CMSCategory.sCategoryName == category)
-        .filter(CMSSubCategory.sCatSubName == subcategory)
-        .filter(CMSManufacturerBrand.sBrandName == brand)
         .filter(CMSSummaryProduct.iProductCountryCode == country_obj.country_code)
+        .filter(CMSSummaryProduct.iProductCategoryCode == category_obj.iCategoryCode)
+        .filter(CMSSummaryProduct.iProductCatSubCode == subcategory_obj.iCatSubCode)
+        .filter(CMSSummaryProduct.sProductModelNo == model)
+        .filter(CMSSummaryProduct.iProductBrandCode == brand_obj.iManBrandCode)
         .first()
     )
 
     if not summary_product:
-        raise HTTPException(status_code=404, detail="No matching product found in summary table")
+        return {
+            "country": country,
+            "category": category,
+            "subcategory": subcategory,
+            "brand": brand,
+            "model": model,
+            "retailer": retailer,
+            "message": "Matching product not found in summary_products"
+        }
 
-    products = (
+    # Step 3: Use iProductCode to get products
+    crawling_products = (
         db.query(CMSCrawlingWebsiteProduct)
-        .filter(CMSCrawlingWebsiteProduct.systemProductId == CMSSummaryProduct.iProductCode)
+        .filter(CMSCrawlingWebsiteProduct.systemProductId == summary_product.iProductCode)
         .filter(CMSCrawlingWebsiteProduct.crawlWebsiteId == retailer_obj.id)
         .filter(CMSCrawlingWebsiteProduct.isActive == 1)
         .all()
     )
 
-    if not products:
-        raise HTTPException(status_code=404, detail="No active product found to export")
+    if not crawling_products:
+        return {
+            "country": country,
+            "category": category,
+            "subcategory": subcategory,
+            "brand": brand,
+            "model": model,
+            "retailer": retailer,
+            "message": "Product found in summary, but not in crawling website products"
+        }
+    
+    # Special Case: If date_type is "current_day", return current price
+    if date_type == "current_day":
+        today_int = int(date.today().strftime("%Y%m%d"))
+        crawl_histories = (
+            db.query(CMSCrawlingWebsiteProductsCrawlHistory)
+            .filter(CMSCrawlingWebsiteProductsCrawlHistory.crawlWebsiteId == retailer_obj.id)
+            .filter(CMSCrawlingWebsiteProductsCrawlHistory.crawlDate == today_int)
+            .filter(CMSCrawlingWebsiteProductsCrawlHistory.deleted == 0)
+            .all()
+        )
+        valid_product_ids = set()
 
-    # Handle date_type logic
+        for history in crawl_histories:
+            serialized = history.searializeProductCodes
+            for product in crawling_products:
+                pid = product.id
+                if f'i:{pid};' in serialized or f's:{len(str(pid))}:"{pid}"' in serialized:
+                    valid_product_ids.add(pid)
+        
+        # Filter crawling_products to include only those in crawl history
+        filtered_products = [p for p in crawling_products if p.id in valid_product_ids]
+
+        if not filtered_products:
+           return {
+                "country": country,
+                "category": category,
+                "subcategory": subcategory,
+                "brand": brand,
+                "model": model,
+                "retailer": retailer,
+                "message": "No valid product found in crawl history for current day"
+            }
+        return [
+           {
+            "country": country,
+            "category": category,
+            "subcategory": subcategory,
+            "brand": brand,
+            "model": model,
+            "retailer": retailer,
+            "price": f"${product.price:,.2f}" if product.price else "N/A",
+           }
+
+           for product in filtered_products
+        ]
+        
+    # Step 4: Handle date filters
+    if start_date and end_date:
+       try:
+           start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+           end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+           start = int(start_dt.strftime("%Y%m%d"))
+           end = int(end_dt.strftime("%Y%m%d"))
+       except ValueError:
+             raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+    elif date_type:
+        start_dt, end_dt = get_date_range_from_type(date_type)
+        if not start_dt or not end_dt:
+           raise HTTPException(status_code=400, detail="Invalid date_type value")
+        start = int(start_dt.strftime("%Y%m%d"))
+        end = int(end_dt.strftime("%Y%m%d"))
+    else:
+        raise HTTPException(status_code=400, detail="Please provide a date range or date_type to fetch price history")
+
+    # Step 5: Match product IDs with crawl history via serialized codes
+    crawl_histories = (
+        db.query(CMSCrawlingWebsiteProductsCrawlHistory)
+        .filter(CMSCrawlingWebsiteProductsCrawlHistory.crawlWebsiteId == retailer_obj.id)
+        .filter(CMSCrawlingWebsiteProductsCrawlHistory.deleted == 0)
+        .all()
+    )
+
+    matched_entries = defaultdict(list)
+
+    # Group crawl records by crawlDate where a match with product ID exists
+    for history in crawl_histories:
+        serialized = history.searializeProductCodes
+        for product in crawling_products:
+            pid = product.id
+            if f'i:{pid};' in serialized or f's:{len(str(pid))}:"{pid}"' in serialized:
+                if start <= history.crawlDate <= end:
+                    matched_entries[history.crawlDate].append({
+                        "product_id": pid,
+                        "crawl_date": history.crawlDate,
+                        "created_at": history.created
+                    })
+    
+    # Now you need to process each crawlDate and select the latest record for each one
+    final_matched_entries = []
+
+    # For each crawlDate, pick the record with latest created_at
+    for crawl_date, records in matched_entries.items():
+         latest_record = max(records, key=lambda x: x["created_at"])
+
+         # Add the latest record to final list
+         final_matched_entries.append({
+             "product_id": latest_record["product_id"],
+             "crawl_date": latest_record["crawl_date"]
+        })
+
+    if not matched_entries:
+        return {
+            "country": country,
+            "category": category,
+            "subcategory": subcategory,
+            "brand": brand,
+            "model": model,
+            "retailer": retailer,
+            "message": "No matching crawl history data found for the given products and date range"
+        }
+
+    # Step 6: Get all matched product IDs and latest created crawlDate per product
+    product_latest_crawl = {}
+
+    for record in final_matched_entries:
+        pid = record["product_id"]
+        crawl_date = record["crawl_date"]
+        if pid not in product_latest_crawl or product_latest_crawl[pid]["created_at"] < record.get("created_at", datetime.min):
+            product_latest_crawl[pid] = {
+                "crawl_date": crawl_date,
+                "created_at": record.get("created_at", datetime.min)
+            }
+
+    # Step 7: Get latest price history reference date per product
+    latest_price_history = (
+        db.query(CMSProductPriceHistory.productId, func.max(CMSProductPriceHistory.referenceDate).label("last_ref"))
+        .filter(CMSProductPriceHistory.productId.in_(product_latest_crawl.keys()))
+        .filter(CMSProductPriceHistory.crawlWebsiteId == retailer_obj.id)
+        .filter(CMSProductPriceHistory.deleted == 0)
+        .group_by(CMSProductPriceHistory.productId)
+        .all()
+    )
+
+    product_last_ref_date = {
+        p.productId: p.last_ref for p in latest_price_history
+    }
+
+    # Load full history for all matched products
+    full_history_prices = defaultdict(dict)
+
+    history_records = (
+        db.query(CMSProductPriceHistory)
+        .filter(CMSProductPriceHistory.productId.in_(product_latest_crawl.keys()))
+        .filter(CMSProductPriceHistory.crawlWebsiteId == retailer_obj.id)
+        .filter(CMSProductPriceHistory.deleted == 0)
+        .all()
+    )
+
+    for record in history_records:
+        full_history_prices[record.productId][record.referenceDate] = record.price
+
+
+    # Step 8: Get crawling website product prices (used for forward fill)
+    product_prices = {
+        p.id: p.price for p in crawling_products if p.price is not None
+    }
+
+    # Step 9: Build complete timeline
+    final_result = []
+    all_dates = []
+    cursor = start_dt.date()
+    while cursor <= end_dt.date():
+        all_dates.append(cursor)
+        cursor += timedelta(days=1)
+    
+    today_date = date.today()
+    for pid in product_latest_crawl.keys():
+        crawl_date = product_latest_crawl[pid]["crawl_date"]
+        forward_price = product_prices.get(pid)
+        history_map = full_history_prices.get(pid, {})
+
+        # Sort the historical dates ascending for forward lookup
+        sorted_history_dates = sorted(history_map.keys())
+        price_timeline = {}
+        last_seen_price = None
+
+        # Step 1: Populate known historical prices
+        for ref_date in sorted_history_dates:
+            price_timeline[ref_date] = history_map[ref_date]
+
+        # Step 2: Backfill missing dates with the last known price
+        current_idx = len(sorted_history_dates) - 1
+        for date_obj in reversed(all_dates):
+            date_int = int(date_obj.strftime("%Y%m%d"))
+            if date_int in price_timeline:
+                last_seen_price = price_timeline[date_int]   
+            elif last_seen_price is not None and date_int < sorted_history_dates[-1]:
+                price_timeline[date_int] = last_seen_price
+
+        # Step 3: Forward-fill using crawling website price
+        for date_obj in all_dates:
+            date_int = int(date_obj.strftime("%Y%m%d"))
+            if date_int > int(today_date.strftime("%Y%m%d")):
+                continue
+
+            if date_int >= crawl_date and date_int not in price_timeline and forward_price is not None:
+                price_timeline[date_int] = forward_price
+
+        # Step 4: Format results
+        for date_obj in all_dates:
+            date_int = int(date_obj.strftime("%Y%m%d"))
+            if date_int in price_timeline:
+                final_result.append({
+                    "country": country,
+                    "category": category,
+                    "subcategory": subcategory,
+                    "brand": brand,
+                    "model": model,
+                    "retailer": retailer,
+                    "Date": date_obj.strftime("%d-%m-%Y"),
+                    "price": f"${price_timeline[date_int]:,.2f}"
+            })
+
+    # Build table_data from result
+    table_data = [list(final_result[0].keys())] if final_result else []
+    for row in final_result:
+        table_data.append([row.get(col, "") for col in table_data[0]])
+
+    start_dt = end_dt = None
+
+    # 1. Handle date_type logic and convert to actual dates
     if date_type and not (start_date and end_date):
         start_dt, end_dt = get_date_range_from_type(date_type)
         if not start_dt or not end_dt:
@@ -820,105 +1216,99 @@ def export_selected_data_as_pdf(
     elif date_type and (start_date or end_date):
         raise HTTPException(status_code=400, detail="Provide either date_type OR start_date/end_date — not both.")
 
-    table_data = []
-    report_title = ""
+    # 2. Set the report title based on dates or fallback
     if start_date and end_date:
-        # Exporting price history
         try:
-            start = int(datetime.strptime(start_date, "%Y-%m-%d").strftime("%Y%m%d"))
-            end = int(datetime.strptime(end_date, "%Y-%m-%d").strftime("%Y%m%d"))
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+            if not start_dt:
+                start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            if not end_dt:
+                end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+            
+            readable_label = {
+                "QTD": "Quarter to Date",
+                "MTD": "Month to Date",
+                "YTD": "Year to Date",
+                "last_month": "Last Month",
+                "last_week": "Last Week",
+                "current_day": "Today",
+                "Q1": "Q1",
+                "Q2": "Q2",
+                "Q3": "Q3",
+                "Q4": "Q4"
+            }.get(date_type.lower() if date_type else "", "Date Range")
 
-        product_ids = [p.id for p in products]
-        history_prices = (
-            db.query(CMSProductPriceHistory)
-            .filter(CMSProductPriceHistory.productId.in_(product_ids))
-            .filter(CMSProductPriceHistory.crawlWebsiteId == retailer_obj.id)
-            .filter(CMSProductPriceHistory.referenceDate.between(start, end))
-            .filter(CMSProductPriceHistory.deleted == 0)
-            .all()
-        )
-
-        table_data = [["Country", "Category", "Subcategory", "Brand", "Model", "Retailer", "Reference Date", "Price"]]
-        for p in history_prices:
-            table_data.append([
-                country,
-                category,
-                subcategory,
-                brand,
-                model,
-                retailer,
-                datetime.strptime(str(p.referenceDate), "%Y%m%d").strftime("%d-%m-%Y"),
-                f"${p.price:,.2f}"
-            ])
-        if not history_prices:
-            table_data.append([
-                country, category, subcategory, brand, model, retailer,
-                f"No price history found between {start_date} and {end_date}",
-                "N/A"
-            ])
-        report_title = f"{date_type or 'Date Range'}: {start_date} to {end_date}"
-
+            report_title = f"{readable_label}: {start_dt.strftime('%d-%b-%Y')} to {end_dt.strftime('%d-%b-%Y')}"
+        except Exception as e:
+            report_title = f"{date_type or 'Date Range'}: {start_date} to {end_date}"
     else:
-        # Exporting current prices
-        table_data = [["Country", "Category", "Subcategory", "Brand", "Model", "Retailer", "Price"]]
-        for product in products:
-            table_data.append([
-                country,
-                category,
-                subcategory,
-                brand,
-                model,
-                retailer,
-                f"${product.price:,.2f}"
-            ])
         report_title = "Current Product Prices"
 
-    # Generate PDF
+    # PDF generation (keep your formatting)
     buffer = BytesIO()
     pdf = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
 
-    # CMS logo
     try:
-       logo_path = r"C:\Users\venki\Work\cms_1\static\cms_logo.png"
-       print("Logo exists:", os.path.exists(logo_path))  
-
-    # Draw the image
-       pdf.drawImage(logo_path, 1.5 * cm, height - 4 * cm, width=3 * cm, preserveAspectRatio=True)
+        logo_path = r"C:\Users\venki\Work\cms_1\static\cms_logo.png"
+        print("Logo exists:", os.path.exists(logo_path))
+        pdf.drawImage(logo_path, 1.5 * cm, height - 4 * cm, width=3 * cm, preserveAspectRatio=True)
     except Exception as e:
         print("Logo drawing failed:", e)
-    
 
     pdf.setFont("Helvetica-Bold", 20)
     pdf.drawCentredString(width / 2, height - 2.0 * cm, "Product Report")
     pdf.setFont("Helvetica", 12)
     pdf.drawCentredString(width / 2, height - 3.0 * cm, report_title)
-    
-    # Watermark: CMS
+
+    # Watermark
     pdf.saveState()
     pdf.setFont("Helvetica-Bold", 60)
-    pdf.setFillColorRGB(0.85, 0.85, 0.85)  # light grey
+    pdf.setFillColorRGB(0.85, 0.85, 0.85)
     pdf.translate(width / 2, height / 2)
-    pdf.rotate(45)  # Rotate text 45 degrees
+    pdf.rotate(45)
     pdf.drawCentredString(0, 0, "CMS")
-    pdf.restoreState()   
+    pdf.restoreState()
 
     # Draw table
-    col_width = (width - 3 * cm) / len(table_data[0])
-    table = Table(table_data, colWidths=[col_width] * len(table_data[0]))
-    table.setStyle(TableStyle([  
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#d3d3d3")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
-        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-        ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
-        ("FONTSIZE", (0, 0), (-1, -1), 8),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 5)
-    ]))
+    MAX_ROWS_PER_PAGE = 40
+    header = table_data[0]
+    data_chunks = [table_data[i:i + MAX_ROWS_PER_PAGE] for i in range(1, len(table_data), MAX_ROWS_PER_PAGE)]
 
-    table.wrapOn(pdf, 2 * cm, 5 * cm)
-    table.drawOn(pdf, 1.5 * cm, height - 8 * cm - len(table_data) * 12)
+    for page_index, chunk in enumerate(data_chunks):
+        if page_index > 0:
+            pdf.showPage()
+            
+            # Title and watermark on subsequent pages
+            pdf.setFont("Helvetica-Bold", 20)
+            pdf.drawCentredString(width / 2, height - 2.0 * cm, "Product Report")
+            pdf.setFont("Helvetica", 12)
+            pdf.drawCentredString(width / 2, height - 3.0 * cm, report_title)
+
+            # Optional: watermark
+            pdf.saveState()
+            pdf.setFont("Helvetica-Bold", 60)
+            pdf.setFillColorRGB(0.85, 0.85, 0.85)
+            pdf.translate(width / 2, height / 2)
+            pdf.rotate(45)
+            pdf.drawCentredString(0, 0, "CMS")
+            pdf.restoreState()
+
+        # Add header to current chunk
+        table_rows = [header] + chunk
+        col_width = (width - 3 * cm) / len(header)
+
+        table = Table(table_rows, colWidths=[col_width] * len(header))
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#d3d3d3")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5)
+        ]))
+        y_position = height - 10 * cm
+        table.wrapOn(pdf, 2 * cm, 5 * cm)
+        table.drawOn(pdf, 1.5 * cm, y_position)
 
     pdf.save()
     buffer.seek(0)
@@ -928,6 +1318,7 @@ def export_selected_data_as_pdf(
         media_type="application/pdf",
         headers={"Content-Disposition": f"attachment; filename={brand}_Report.pdf"}
     )
+
 
 # Save the view in History section
 @router.post("/report/save")
