@@ -1,6 +1,8 @@
 # Local ignores
 env/
 dumps/
+__pycache__/
+*.pyc
 
 
 # Node artifact files
