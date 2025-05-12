@@ -1274,17 +1274,19 @@ def get_price_by_names(
     header = table_data[0]
     data_chunks = [table_data[i:i + MAX_ROWS_PER_PAGE] for i in range(1, len(table_data), MAX_ROWS_PER_PAGE)]
 
+    top_margin = height - 5.5 * cm  # Start table just below title
+    bottom_margin = 2 * cm
+
     for page_index, chunk in enumerate(data_chunks):
         if page_index > 0:
             pdf.showPage()
-            
-            # Title and watermark on subsequent pages
+
+            # Title and watermark for additional pages
             pdf.setFont("Helvetica-Bold", 20)
             pdf.drawCentredString(width / 2, height - 2.0 * cm, "Product Report")
             pdf.setFont("Helvetica", 12)
             pdf.drawCentredString(width / 2, height - 3.0 * cm, report_title)
 
-            # Optional: watermark
             pdf.saveState()
             pdf.setFont("Helvetica-Bold", 60)
             pdf.setFillColorRGB(0.85, 0.85, 0.85)
@@ -1293,10 +1295,9 @@ def get_price_by_names(
             pdf.drawCentredString(0, 0, "CMS")
             pdf.restoreState()
 
-        # Add header to current chunk
+        # Table rendering
         table_rows = [header] + chunk
         col_width = (width - 3 * cm) / len(header)
-
         table = Table(table_rows, colWidths=[col_width] * len(header))
         table.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#d3d3d3")),
@@ -1306,8 +1307,10 @@ def get_price_by_names(
             ("FONTSIZE", (0, 0), (-1, -1), 8),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 5)
         ]))
-        y_position = height - 10 * cm
-        table.wrapOn(pdf, 2 * cm, 5 * cm)
+
+        # Wrap with real page size
+        y_position = height - 6 * cm
+        table.wrapOn(pdf, width, height)
         table.drawOn(pdf, 1.5 * cm, y_position)
 
     pdf.save()
