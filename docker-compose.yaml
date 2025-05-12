@@ -6,7 +6,7 @@ services:
     container_name: mysql_container
     restart: always
     environment:
-      MYSQL_ROOT_PASSWORD: Vision@2025#
+      MYSQL_ROOT_PASSWORD: Vision_2025
       MYSQL_DATABASE: cms
     ports:
       - "3306:3306"
