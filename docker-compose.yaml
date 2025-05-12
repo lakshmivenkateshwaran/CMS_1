@@ -21,7 +21,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      DATABASE_URL: mysql+pymysql://root:Vision@2025#@db/cms
+      DATABASE_URL: mysql+pymysql://root:Vision@2025#@74.48.111.163/cms
       SECRET_KEY: your_secret_key_here
     volumes:
       - .:/cms_1  # Mounts your current code to the container
