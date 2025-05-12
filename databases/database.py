@@ -9,7 +9,7 @@ from urllib.parse import quote_plus
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-password = quote_plus(os.getenv("DB_PASSWORD"))
+#password = quote_plus(os.getenv("DB_PASSWORD"))
 
 # Database connection
 engine = create_engine(DATABASE_URL)
