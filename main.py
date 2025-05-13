@@ -3,6 +3,8 @@ from routes.auth import router as auth_router
 from routes.dashboard import router as dashboard
 from routes.add_report import router as add_report
 from fastapi.middleware.cors import CORSMiddleware
+from databases.database import Base, engine
+import models
 
 app = FastAPI(docs_url="/docs", redoc_url="/redoc")
 
@@ -27,3 +29,8 @@ def home():
 @app.get("/test")
 def test():
     return {"message": "Swagger should work"}
+
+@app.get("/create-tables")
+def create_tables():
+    Base.metadata.create_all(bind=engine)
+    return {"message": "Tables created successfully"}
