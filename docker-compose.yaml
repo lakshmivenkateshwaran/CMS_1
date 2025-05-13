@@ -6,7 +6,7 @@ services:
     container_name: mysql_container
     restart: always
     environment:
-      MYSQL_ROOT_PASSWORD: Vision%402025%23
+      MYSQL_ROOT_PASSWORD: admin
       MYSQL_DATABASE: cms
     ports:
       - "3306:3306"
@@ -21,7 +21,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      DATABASE_URL: mysql+pymysql://root:Vision%402025%23@74.48.111.163/cms
+      DATABASE_URL: mysql+pymysql://root:Vision-2025@74.48.111.163/cms
       SECRET_KEY: your_secret_key_here
     volumes:
       - .:/cms_1  # Mounts your current code to the container

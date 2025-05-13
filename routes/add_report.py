@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, Query, HTTPException, Response
 from fastapi.responses import JSONResponse, FileResponse
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill
+from openpyxl.styles import Font, PatternFill, Alignment
 from collections import defaultdict
 from datetime import date
 import json
@@ -761,13 +761,66 @@ def get_price_by_names(
                     "price": f"${price_timeline[date_int]:,.2f}"
             })
                 
-    
+    start_dt = end_dt = None
+
+    if date_type and not (start_date and end_date):
+        start_dt, end_dt = get_date_range_from_type(date_type)
+        if not start_dt or not end_dt:
+            raise HTTPException(status_code=400, detail="Invalid date_type provided.")
+        start_date = start_dt.strftime("%Y-%m-%d")
+        end_date = end_dt.strftime("%Y-%m-%d")
+
+    elif date_type and (start_date or end_date):
+        raise HTTPException(status_code=400, detail="Provide either date_type OR start_date/end_date — not both.")
+
+    if start_date and end_date:
+        try:
+            if not start_dt:
+                start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            if not end_dt:
+                end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+            
+            readable_label = {
+                "QTD": "Quarter to Date",
+                "MTD": "Month to Date",
+                "YTD": "Year to Date",
+                "last_month": "Last Month",
+                "last_week": "Last Week",
+                "current_day": "Today",
+                "Q1": "Q1",
+                "Q2": "Q2",
+                "Q3": "Q3",
+                "Q4": "Q4"
+            }.get(date_type.lower() if date_type else "", "Date Range")
+
+            report_title = f"{readable_label}: {start_dt.strftime('%d-%b-%Y')} to {end_dt.strftime('%d-%b-%Y')}"
+        except Exception:
+            report_title = f"{date_type or 'Date Range'}: {start_date} to {end_date}"
+    else:
+        report_title = "Current Product Prices"
     wb = Workbook()
     ws = wb.active
     ws.title = "Price Report"
 
+    # Add title row in merged cells
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=8)
+    ws["A1"] = report_title
+    ws["A1"].font = Font(size=14, bold=True)
+    ws["A1"].alignment = Alignment(horizontal="center")
+
     headers = list(final_result[0].keys()) if final_result else []
     ws.append(headers)
+
+    # Define header style
+    header_font = Font(bold=True, color="000000")  # black text
+    header_fill = PatternFill(fill_type="solid", fgColor="D9E1F2")  # Blue background
+    header_alignment = Alignment(horizontal="center", vertical="center")
+
+    # Apply styles to header row
+    for col_num, cell in enumerate(ws[2], 1):  # Row 2 if the title is on row 1
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = header_alignment
 
     # Optional styling
     header_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
@@ -1309,9 +1362,8 @@ def get_price_by_names(
         ]))
 
         # Wrap with real page size
-        y_position = height - 6 * cm
-        table.wrapOn(pdf, width, height)
-        table.drawOn(pdf, 1.5 * cm, y_position)
+        table.wrapOn(pdf, 2 * cm, 5 * cm)
+        table.drawOn(pdf, 1.5 * cm, height - 8 * cm - len(table_data) * 12)
 
     pdf.save()
     buffer.seek(0)
