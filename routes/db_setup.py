@@ -6,6 +6,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy import text
 import os
 import shutil
+import sqlparse
 
 router = APIRouter()
 
@@ -29,6 +30,44 @@ async def upload_sql_file(file: UploadFile = File(...)):
 
     # Delete the file after execution
     os.remove(temp_path)
+    return {"message": "SQL executed successfully"}
+
+@router.post("/upload-sql-crawling/")
+async def upload_sql_file_crawling(file: UploadFile = File(...)):
+    temp_path = f"/tmp/{file.filename}"
+    with open(temp_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    with open(temp_path, "r", encoding="utf-8") as f:
+        sql_content = f.read()
+
+    connection = engine.raw_connection()
+    try:
+        cursor = connection.cursor()
+
+        # Parse and execute statements safely (this handles semicolons inside strings)
+        statements = sqlparse.split(sql_content)
+        for stmt in statements:
+            clean_stmt = stmt.strip()
+            if clean_stmt:
+                cursor.execute(clean_stmt)
+
+        connection.commit()
+    except Exception as e:
+        if connection:
+            try:
+                connection.rollback()
+            except Exception:
+                pass
+        raise e
+    finally:
+        try:
+            cursor.close()
+            connection.close()
+        except:
+            pass
+        os.remove(temp_path)
+
     return {"message": "SQL executed successfully"}
 
 @router.post("/setup-db/mst_parameter")

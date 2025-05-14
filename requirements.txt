@@ -12,5 +12,6 @@ fastapi-mail
 reportlab
 openpyxl
 python-multipart
+sqlparse
 
 
