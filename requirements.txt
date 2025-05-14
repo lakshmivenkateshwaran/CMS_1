@@ -11,4 +11,6 @@ pyjwt
 fastapi-mail
 reportlab
 openpyxl
+python-multipart
+
 
