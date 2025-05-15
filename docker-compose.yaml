@@ -22,8 +22,8 @@ services:
       - .env
     environment:
       #DATABASE_URL: mysql+pymysql://root:root@host.docker.internal:3308/cms
-      DATABASE_URL: mysql+pymysql://root:admin@db/cms
-      #DATABASE_URL: mysql+pymysql://root:Vision-2025@127.0.0.1:3306/cms
+      #DATABASE_URL: mysql+pymysql://root:admin@db/cms
+      DATABASE_URL: mysql+pymysql://root:Vision-2025@74.48.111.163:3306/cms
       SECRET_KEY: your_secret_key_here
     volumes:
       - .:/cms_1  # Mounts current code to the container
