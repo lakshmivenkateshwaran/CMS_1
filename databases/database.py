@@ -8,7 +8,13 @@ from urllib.parse import quote_plus
 # Load environment variables
 load_dotenv()
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+
+DB_USER = os.getenv("db_user")
+DB_PASSWORD = os.getenv("db_password")
+DB_HOST = os.getenv("db_host")
+DB_PORT = os.getenv("db_port")
+DB_NAME = os.getenv("db_name")
+DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 #password = quote_plus(os.getenv("DB_PASSWORD"))
 
 # Database connection
