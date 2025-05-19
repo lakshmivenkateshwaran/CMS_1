@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse, FileResponse
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from collections import defaultdict
+from slugify import slugify
 from datetime import date
 import json
 import csv
@@ -211,6 +212,8 @@ def get_price_by_names(
     brand: str = Query(...),
     model: str = Query(...),
     retailer: str = Query(...),
+    description_type: Optional[str] = Query(None, description="Choose 'Name' or 'Features'"),
+    description_field: Optional[str] = Query(None, description="Actual Description Field value for fetching product IDs"),
     start_date: str = Query(None, description="Start date in YYYY-MM-DD format"),
     end_date: str = Query(None, description="End date in YYYY-MM-DD format"),
     date_type: Optional[str] = Query(None, description="Optional date type: MTD, QTD, Q1, Q2, etc."),
@@ -247,26 +250,81 @@ def get_price_by_names(
             "retailer": retailer,
             "message": "Matching product not found in summary_products"
         }
+    
+    final_product_ids = []
 
-    # Step 3: Use iProductCode to get products
-    crawling_products = (
-        db.query(CMSCrawlingWebsiteProduct)
-        .filter(CMSCrawlingWebsiteProduct.systemProductId == summary_product.iProductCode)
-        .filter(CMSCrawlingWebsiteProduct.crawlWebsiteId == retailer_obj.id)
-        .filter(CMSCrawlingWebsiteProduct.isActive == 1)
-        .all()
-    )
+    if description_type and description_field:
+        # Step 3: Handle description filtering
+        if description_type not in ["Name", "Features"]:
+            raise HTTPException(status_code=400, detail="description_type must be either 'Name' or 'Features'")
 
-    if not crawling_products:
-        return {
-            "country": country,
-            "category": category,
-            "subcategory": subcategory,
-            "brand": brand,
-            "model": model,
-            "retailer": retailer,
-            "message": "Product found in summary, but not in crawling website products"
-        }
+        # Find split name ID for description
+        split_name_obj = db.query(CMSSummaryDescriptionSplit).filter(CMSSummaryDescriptionSplit.sDescriptionHeading == description_type).first()
+        if not split_name_obj:
+            raise HTTPException(status_code=404, detail="Provided description field not found")
+
+        # Find description link
+        split_link_obj = (
+            db.query(CMSSummaryDescriptionSplitDescriptionLink)
+            .filter(CMSSummaryDescriptionSplitDescriptionLink.summaryDescriptionSplitId == split_name_obj.id)
+            .first()
+        )
+
+        if not split_link_obj:
+            raise HTTPException(status_code=404, detail="Description link not found")
+
+        # Find mapped products
+        mapped_products = (
+            db.query(CMSSummaryDescriptionSplitProductLink)
+            .filter(CMSSummaryDescriptionSplitProductLink.summaryDescriptionSplitId == split_link_obj.summaryDescriptionSplitId)
+            .filter(CMSSummaryDescriptionSplitProductLink.summaryDescriptionSplitDescriptionId == split_link_obj.id)
+            .filter(CMSSummaryDescriptionSplitProductLink.deleted == 0)
+            .all()
+        )
+
+        if not mapped_products:
+            raise HTTPException(status_code=404, detail="No mapped products found")
+
+        mapped_product_codes = [mp.iProductCode for mp in mapped_products]
+
+        # Fetch mapped products from summary_products
+        final_summary_products = (
+            db.query(CMSSummaryProduct)
+            .filter(CMSSummaryProduct.iProductCode.in_(mapped_product_codes))
+            .filter(CMSSummaryProduct.deleted == 0)
+            .all()
+        )
+        final_product_codes = [fsp.iProductCode for fsp in final_summary_products]
+
+        # Fetch corresponding crawling website products
+        crawling_products = (
+            db.query(CMSCrawlingWebsiteProduct)
+            .filter(CMSCrawlingWebsiteProduct.systemProductId.in_(final_product_codes))
+            .filter(CMSCrawlingWebsiteProduct.crawlWebsiteId == retailer_obj.id)
+            .filter(CMSCrawlingWebsiteProduct.isActive == 1)
+            .all()
+        )
+
+    else:
+        # Step 3: Use iProductCode to get products
+        crawling_products = (
+            db.query(CMSCrawlingWebsiteProduct)
+            .filter(CMSCrawlingWebsiteProduct.systemProductId == summary_product.iProductCode)
+            .filter(CMSCrawlingWebsiteProduct.crawlWebsiteId == retailer_obj.id)
+            .filter(CMSCrawlingWebsiteProduct.isActive == 1)
+            .all()
+        )
+
+        if not crawling_products:
+            return {
+                "country": country,
+                "category": category,
+                "subcategory": subcategory,
+                "brand": brand,
+                "model": model,
+                "retailer": retailer,
+                "message": "Product found in summary, but not in crawling website products"
+            }
     
     # Special Case: If date_type is "current_day", return current price
     if date_type == "current_day":
@@ -300,19 +358,31 @@ def get_price_by_names(
                 "retailer": retailer,
                 "message": "No valid product found in crawl history for current day"
             }
-        return [
-           {
-            "country": country,
-            "category": category,
-            "subcategory": subcategory,
-            "brand": brand,
-            "model": model,
-            "retailer": retailer,
-            "price": f"${product.price:,.2f}" if product.price else "N/A",
-           }
+        result = []
+        for product in filtered_products:
+            description_field = ""
 
-           for product in filtered_products
-        ]
+            if description_type == "Name":
+                description_field = product.description
+            elif description_type == "Features":
+                summary_product_obj = db.query(CMSSummaryProduct).filter(
+                    CMSSummaryProduct.iProductCode == product.systemProductId
+                ).first()
+                description_field = summary_product_obj.sProductOneLineDesc if summary_product_obj else ""
+        
+            result.append({
+                "country": country,
+                "category": category,
+                "subcategory": subcategory,
+                "brand": brand,
+                "model": model,
+                "retailer": retailer,
+                "description_type": description_type or "",
+                "description_field": description_field or "",
+                "price": f"${product.price:,.2f}" if product.price else "N/A",
+            })
+
+        return result
         
     # Step 4: Handle date filters
     if start_date and end_date:
@@ -470,15 +540,29 @@ def get_price_by_names(
         for date_obj in all_dates:
             date_int = int(date_obj.strftime("%Y%m%d"))
             if date_int in price_timeline:
-                final_result.append({
-                    "country": country,
-                    "category": category,
-                    "subcategory": subcategory,
-                    "brand": brand,
-                    "model": model,
-                    "retailer": retailer,
-                    "Date": date_obj.strftime("%d-%m-%Y"),
-                    "price": f"${price_timeline[date_int]:,.2f}"
+                final_description = ""
+        
+                if description_type == "Name":
+                    crawling_product = next((p for p in crawling_products if p.id == pid), None)
+                    final_description = crawling_product.description if crawling_product else ""
+
+                elif description_type == "Features":
+                    summary_product_obj = db.query(CMSSummaryProduct).filter(
+                        CMSSummaryProduct.iProductCode == crawling_product.systemProductId
+                    ).first() if crawling_product else None
+                    final_description = summary_product_obj.sProductOneLineDesc if summary_product_obj else ""
+
+            final_result.append({
+                "country": country,
+                "category": category,
+                "subcategory": subcategory,
+                "brand": brand,
+                "model": model,
+                "retailer": retailer,
+                "description_type": description_type or "",
+                "description_field": final_description or "",
+                "Date": date_obj.strftime("%d-%m-%Y"),
+                "price": f"${price_timeline[date_int]:,.2f}"
             })
 
     return final_result
@@ -491,6 +575,8 @@ def get_price_by_names(
     brand: str = Query(...),
     model: str = Query(...),
     retailer: str = Query(...),
+    description_type: Optional[str] = Query(None, description="Choose 'Name' or 'Features'"),
+    description_field: Optional[str] = Query(None, description="Actual Description Field value for fetching product IDs"),
     start_date: str = Query(None, description="Start date in YYYY-MM-DD format"),
     end_date: str = Query(None, description="End date in YYYY-MM-DD format"),
     date_type: Optional[str] = Query(None, description="Optional date type: MTD, QTD, Q1, Q2, etc."),
@@ -527,26 +613,80 @@ def get_price_by_names(
             "retailer": retailer,
             "message": "Matching product not found in summary_products"
         }
+        final_product_ids = []
 
-    # Step 3: Use iProductCode to get products
-    crawling_products = (
-        db.query(CMSCrawlingWebsiteProduct)
-        .filter(CMSCrawlingWebsiteProduct.systemProductId == summary_product.iProductCode)
-        .filter(CMSCrawlingWebsiteProduct.crawlWebsiteId == retailer_obj.id)
-        .filter(CMSCrawlingWebsiteProduct.isActive == 1)
-        .all()
-    )
+    if description_type and description_field:
+        # Step 3: Handle description filtering
+        if description_type not in ["Name", "Features"]:
+            raise HTTPException(status_code=400, detail="description_type must be either 'Name' or 'Features'")
 
-    if not crawling_products:
-        return {
-            "country": country,
-            "category": category,
-            "subcategory": subcategory,
-            "brand": brand,
-            "model": model,
-            "retailer": retailer,
-            "message": "Product found in summary, but not in crawling website products"
-        }
+        # Find split name ID for description
+        split_name_obj = db.query(CMSSummaryDescriptionSplit).filter(CMSSummaryDescriptionSplit.sDescriptionHeading == description_type).first()
+        if not split_name_obj:
+            raise HTTPException(status_code=404, detail="Provided description field not found")
+
+        # Find description link
+        split_link_obj = (
+            db.query(CMSSummaryDescriptionSplitDescriptionLink)
+            .filter(CMSSummaryDescriptionSplitDescriptionLink.summaryDescriptionSplitId == split_name_obj.id)
+            .first()
+        )
+
+        if not split_link_obj:
+            raise HTTPException(status_code=404, detail="Description link not found")
+
+        # Find mapped products
+        mapped_products = (
+            db.query(CMSSummaryDescriptionSplitProductLink)
+            .filter(CMSSummaryDescriptionSplitProductLink.summaryDescriptionSplitId == split_link_obj.summaryDescriptionSplitId)
+            .filter(CMSSummaryDescriptionSplitProductLink.summaryDescriptionSplitDescriptionId == split_link_obj.id)
+            .filter(CMSSummaryDescriptionSplitProductLink.deleted == 0)
+            .all()
+        )
+
+        if not mapped_products:
+            raise HTTPException(status_code=404, detail="No mapped products found")
+
+        mapped_product_codes = [mp.iProductCode for mp in mapped_products]
+
+        # Fetch mapped products from summary_products
+        final_summary_products = (
+            db.query(CMSSummaryProduct)
+            .filter(CMSSummaryProduct.iProductCode.in_(mapped_product_codes))
+            .filter(CMSSummaryProduct.deleted == 0)
+            .all()
+        )
+        final_product_codes = [fsp.iProductCode for fsp in final_summary_products]
+
+        # Fetch corresponding crawling website products
+        crawling_products = (
+            db.query(CMSCrawlingWebsiteProduct)
+            .filter(CMSCrawlingWebsiteProduct.systemProductId.in_(final_product_codes))
+            .filter(CMSCrawlingWebsiteProduct.crawlWebsiteId == retailer_obj.id)
+            .filter(CMSCrawlingWebsiteProduct.isActive == 1)
+            .all()
+        )
+
+    else:
+        # Step 3: Use iProductCode to get products
+        crawling_products = (
+            db.query(CMSCrawlingWebsiteProduct)
+            .filter(CMSCrawlingWebsiteProduct.systemProductId == summary_product.iProductCode)
+            .filter(CMSCrawlingWebsiteProduct.crawlWebsiteId == retailer_obj.id)
+            .filter(CMSCrawlingWebsiteProduct.isActive == 1)
+            .all()
+        )
+
+        if not crawling_products:
+            return {
+                "country": country,
+                "category": category,
+                "subcategory": subcategory,
+                "brand": brand,
+                "model": model,
+                "retailer": retailer,
+                "message": "Product found in summary, but not in crawling website products"
+            }
     
     # Special Case: If date_type is "current_day", return current price
     if date_type == "current_day":
@@ -580,20 +720,32 @@ def get_price_by_names(
                 "retailer": retailer,
                 "message": "No valid product found in crawl history for current day"
             }
-        return [
-           {
-            "country": country,
-            "category": category,
-            "subcategory": subcategory,
-            "brand": brand,
-            "model": model,
-            "retailer": retailer,
-            "price": f"${product.price:,.2f}" if product.price else "N/A",
-           }
+        result = []
+        for product in filtered_products:
+            description_field = ""
 
-           for product in filtered_products
-        ]
+            if description_type == "Name":
+                description_field = product.description
+            elif description_type == "Features":
+                summary_product_obj = db.query(CMSSummaryProduct).filter(
+                    CMSSummaryProduct.iProductCode == product.systemProductId
+                ).first()
+                description_field = summary_product_obj.sProductOneLineDesc if summary_product_obj else ""
         
+            result.append({
+                "country": country,
+                "category": category,
+                "subcategory": subcategory,
+                "brand": brand,
+                "model": model,
+                "retailer": retailer,
+                "description_type": description_type or "",
+                "description_field": description_field or "",
+                "price": f"${product.price:,.2f}" if product.price else "N/A",
+            })
+
+        return result
+                 
     # Step 4: Handle date filters
     if start_date and end_date:
        try:
@@ -750,15 +902,29 @@ def get_price_by_names(
         for date_obj in all_dates:
             date_int = int(date_obj.strftime("%Y%m%d"))
             if date_int in price_timeline:
-                final_result.append({
-                    "country": country,
-                    "category": category,
-                    "subcategory": subcategory,
-                    "brand": brand,
-                    "model": model,
-                    "retailer": retailer,
-                    "Date": date_obj.strftime("%d-%m-%Y"),
-                    "price": f"${price_timeline[date_int]:,.2f}"
+                final_description = ""
+        
+                if description_type == "Name":
+                    crawling_product = next((p for p in crawling_products if p.id == pid), None)
+                    final_description = crawling_product.description if crawling_product else ""
+
+                elif description_type == "Features":
+                    summary_product_obj = db.query(CMSSummaryProduct).filter(
+                        CMSSummaryProduct.iProductCode == crawling_product.systemProductId
+                    ).first() if crawling_product else None
+                    final_description = summary_product_obj.sProductOneLineDesc if summary_product_obj else ""
+
+            final_result.append({
+                "country": country,
+                "category": category,
+                "subcategory": subcategory,
+                "brand": brand,
+                "model": model,
+                "retailer": retailer,
+                "description_type": description_type or "",
+                "description_field": final_description or "",
+                "Date": date_obj.strftime("%d-%m-%Y"),
+                "price": f"${price_timeline[date_int]:,.2f}"
             })
                 
     start_dt = end_dt = None
@@ -842,130 +1008,47 @@ def get_price_by_names(
     )
     
 @router.get("/export-csv")
-def export_selected_data_as_csv(
+def export_csv_with_full_logic(
     country: str = Query(...),
     category: str = Query(...),
     subcategory: str = Query(...),
     brand: str = Query(...),
     model: str = Query(...),
     retailer: str = Query(...),
-    start_date: str = Query(None, description="Start date in YYYY-MM-DD format"),
-    end_date: str = Query(None, description="End date in YYYY-MM-DD format"),
-    date_type: str = Query(None, description="Choose from QTD, MTD, Last Month, etc."),
+    start_date: str = Query(None),
+    end_date: str = Query(None),
+    date_type: str = Query(None),
     db: Session = Depends(get_db)
 ):
-    # Step 1: Resolve necessary names to objects
-    country_obj = db.query(CMSCountry).filter(CMSCountry.country == country).first()
-    retailer_obj = db.query(CrawlingWebsite).filter(CrawlingWebsite.companyName == retailer).first()
-
-    if not country_obj or not retailer_obj:
-        raise HTTPException(status_code=404, detail="Country or Retailer not found")
-
-    # Step 2: Resolve product from summary
-    summary_product = (
-        db.query(CMSSummaryProduct)
-        .join(CMSCategory, CMSSummaryProduct.iProductCategoryCode == CMSCategory.iCategoryCode)
-        .join(CMSSubCategory, CMSSummaryProduct.iProductCatSubCode == CMSSubCategory.iCatSubCode)
-        .join(CMSManufacturerBrand, CMSSummaryProduct.iProductBrandCode == CMSManufacturerBrand.iManBrandCode)
-        .filter(CMSSummaryProduct.sProductModelNo == model)
-        .filter(CMSCategory.sCategoryName == category)
-        .filter(CMSSubCategory.sCatSubName == subcategory)
-        .filter(CMSManufacturerBrand.sBrandName == brand)
-        .filter(CMSSummaryProduct.iProductCountryCode == country_obj.country_code)
-        .first()
+    # Step 1: Reuse shared function
+    response = get_price_by_names(
+        db=db,
+        country=country,
+        category=category,
+        subcategory=subcategory,
+        brand=brand,
+        model=model,
+        retailer=retailer,
+        start_date=start_date,
+        end_date=end_date,
+        date_type=date_type
     )
 
-    if not summary_product:
-        raise HTTPException(status_code=404, detail="No matching product found in summary table")
+    # Extract JSON data from the response content
+    content_str = response.body.decode() if hasattr(response, 'body') else response.body
+    data_rows = json.loads(content_str)
 
-    # Step 3: Get all matching products from crawling_website_products
-    products = (
-        db.query(CMSCrawlingWebsiteProduct)
-        .filter(CMSCrawlingWebsiteProduct.systemProductId == CMSSummaryProduct.iProductCode)
-        .filter(CMSCrawlingWebsiteProduct.crawlWebsiteId == retailer_obj.id)
-        .filter(CMSCrawlingWebsiteProduct.isActive == 1)
-        .all()
-    )
-
-    if not products:
-        raise HTTPException(status_code=404, detail="No active product found to export")
-
+    # Step 2: Prepare CSV
     output = io.StringIO()
+    fieldnames = [
+        "Date", "Country", "Category", "Subcategory", "Brand", "Model",
+        "Retailer", "Price"
+    ]
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
 
-    # Date type handling
-    if date_type and not (start_date and end_date):
-        start_dt, end_dt = get_date_range_from_type(date_type)
-        if not start_dt or not end_dt:
-            raise HTTPException(status_code=400, detail="Invalid date_type provided.")
-        start_date = start_dt.strftime("%Y-%m-%d")
-        end_date = end_dt.strftime("%Y-%m-%d")
-
-    elif date_type and (start_date or end_date):
-        raise HTTPException(status_code=400, detail="Provide either date_type OR start_date/end_date — not both.")
-
-    # Step 4: If date filters are provided, fetch price history
-    if start_date and end_date:
-        try:
-            start = int(datetime.strptime(start_date, "%Y-%m-%d").strftime("%Y%m%d"))
-            end = int(datetime.strptime(end_date, "%Y-%m-%d").strftime("%Y%m%d"))
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
-
-        product_ids = [p.id for p in products]
-
-        history_prices = (
-            db.query(CMSProductPriceHistory)
-            .filter(CMSProductPriceHistory.productId.in_(product_ids))
-            .filter(CMSProductPriceHistory.crawlWebsiteId == retailer_obj.id)
-            .filter(CMSProductPriceHistory.referenceDate.between(start, end))
-            .filter(CMSProductPriceHistory.deleted == 0)
-            .all()
-        )
-
-        fieldnames = ["Country", "Category", "Subcategory", "Brand", "Model", "Retailer", "Price", "Reference Date"]
-        writer = csv.DictWriter(output, fieldnames=fieldnames)
-        writer.writeheader()
-
-        for p in history_prices:
-            writer.writerow({
-                "Country": country,
-                "Category": category,
-                "Subcategory": subcategory,
-                "Brand": brand,
-                "Model": model,
-                "Retailer": retailer,
-                "Price": f"${p.price:,.2f}",
-                "Reference Date": datetime.strptime(str(p.referenceDate), "%Y%m%d").strftime("%d-%m-%Y")
-            })
-
-        if not history_prices:
-            writer.writerow({
-                "Country": country,
-                "Category": category,
-                "Subcategory": subcategory,
-                "Brand": brand,
-                "Model": model,
-                "Retailer": retailer,
-                "Price": "N/A",
-                "Reference Date": f"No price history found between {start_date} and {end_date}"
-            })
-
-    else:
-        # Step 5: Default to current product price export
-        fieldnames = ["Country", "Category", "Subcategory", "Brand", "Model", "Retailer", "Price"]
-        writer = csv.DictWriter(output, fieldnames=fieldnames)
-        writer.writeheader()
-
-        for product in products:
-            writer.writerow({
-                "Country": country,
-                "Category": category,
-                "Subcategory": subcategory,
-                "Brand": brand,
-                "Model": model,
-                "Retailer": retailer,
-                "Price": f"${product.price:,.2f}"
-            })
+    for row in data_rows:
+        writer.writerow(row)
 
     return Response(
         content=output.getvalue(),
@@ -1018,25 +1101,26 @@ def get_price_by_names(
             "message": "Matching product not found in summary_products"
         }
 
-    # Step 3: Use iProductCode to get products
-    crawling_products = (
-        db.query(CMSCrawlingWebsiteProduct)
-        .filter(CMSCrawlingWebsiteProduct.systemProductId == summary_product.iProductCode)
-        .filter(CMSCrawlingWebsiteProduct.crawlWebsiteId == retailer_obj.id)
-        .filter(CMSCrawlingWebsiteProduct.isActive == 1)
-        .all()
-    )
+    else:
+        # Step 3: Use iProductCode to get products
+        crawling_products = (
+            db.query(CMSCrawlingWebsiteProduct)
+            .filter(CMSCrawlingWebsiteProduct.systemProductId == summary_product.iProductCode)
+            .filter(CMSCrawlingWebsiteProduct.crawlWebsiteId == retailer_obj.id)
+            .filter(CMSCrawlingWebsiteProduct.isActive == 1)
+            .all()
+        )
 
-    if not crawling_products:
-        return {
-            "country": country,
-            "category": category,
-            "subcategory": subcategory,
-            "brand": brand,
-            "model": model,
-            "retailer": retailer,
-            "message": "Product found in summary, but not in crawling website products"
-        }
+        if not crawling_products:
+            return {
+                "country": country,
+                "category": category,
+                "subcategory": subcategory,
+                "brand": brand,
+                "model": model,
+                "retailer": retailer,
+                "message": "Product found in summary, but not in crawling website products"
+            }
     
     # Special Case: If date_type is "current_day", return current price
     if date_type == "current_day":

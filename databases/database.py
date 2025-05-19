@@ -8,6 +8,7 @@ from urllib.parse import quote_plus
 # Load environment variables
 load_dotenv()
 
+#DATABASE_URL = os.getenv("DATABASE_URL")
 
 DB_USER = os.getenv("db_user")
 DB_PASSWORD = os.getenv("db_password")

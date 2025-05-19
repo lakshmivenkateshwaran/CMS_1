@@ -13,5 +13,6 @@ reportlab
 openpyxl
 python-multipart
 sqlparse
+slugify
 
 
