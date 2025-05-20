@@ -2,6 +2,11 @@ from pydantic import BaseModel
 from typing import Optional, Dict
 from datetime import datetime
 
+class ReportTypeOut(BaseModel):
+    id: int
+    name: str
+    code: str
+
 class ReportFilter(BaseModel):
     report_name: Optional[str]
     chart_type_id: Optional[int]

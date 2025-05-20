@@ -33,6 +33,7 @@ from models.crawl_websites_model import CrawlingWebsite
 from schemas.crawl_schema import WebsiteCrawlSummary
 from schemas.addreport_schema import SaveReportView
 from schemas.addreport_schema import ReportSummary
+from schemas.addreport_schema import ReportTypeOut
 from models.cms_country import CMSCountry
 from models.cms_accountcategory import CMSAccountsCategoryLinks
 from models.cms_category import CMSCategory
@@ -51,6 +52,10 @@ from models.cms_clientreportparameter import CMSClientReportParameter
 from models.cms_description_split import CMSSummaryDescriptionSplit
 from models.cms_description_split_desc_link import CMSSummaryDescriptionSplitDescriptionLink
 from models.cms_description_split_product_link import CMSSummaryDescriptionSplitProductLink
+from models.cms_reporttypes import MSTClientReportType
+from models.cms_city import City
+from models.cms_publications import CMSNewspaper
+from models.cms_retailername import CMSRetailer
 from security.security import get_current_user_id
 
 
@@ -120,6 +125,11 @@ def get_today_website_crawled_summary(db: Session = Depends(get_db)):
     )
 
     return results
+
+# Report Types
+@router.get("/dropdown/report-types", response_model=List[ReportTypeOut])
+def get_report_types(db: Session = Depends(get_db)):
+    return db.query(MSTClientReportType).all()
 
 # Country Dropdown
 @router.get("/dropdown/countries")
@@ -203,7 +213,41 @@ def get_retailers(country_id: int, db: Session = Depends(get_db)):
 
     return [{"id": r.id, "name": r.companyName} for r in retailers]
 
+# City Dropdown
+@router.get("/dropdown/cities")
+def get_cities(country_code: int, db: Session = Depends(get_db)):
+    # Join tblCity and tblRetailer to return only cities with active retailers
+    cities = db.query(City).join(
+        CMSRetailer,
+        City.iCityCode == CMSRetailer.iRetailerCityCode
+    ).filter(
+        City.iCountryCode == country_code,
+        City.bDeleted != 1,
+        City.bActivated == 1,
+        CMSRetailer.bDeleted != 1
+    ).distinct().order_by(City.sCityName).all()
 
+    return [{"id": city.iCityCode, "name": city.sCityName} for city in cities]
+
+# Publication Dropdown
+@router.get("/dropdown/publications")
+def get_publications(city_code: int, db: Session = Depends(get_db)):
+    # Filter publications based on city and non-deleted entries
+    publications = db.query(CMSNewspaper).filter(
+        CMSNewspaper.iNewspaperCityCode == city_code,
+        CMSNewspaper.bDeleted != 1
+    ).distinct().order_by(CMSNewspaper.sNewspaperName).all()
+
+    return [
+        {
+            "id": pub.iNewspaperCode,
+            "name": pub.sNewspaperName,
+            "publication": pub.sNewspaperPublication
+        }
+        for pub in publications
+    ]
+
+# Submit endpoint
 @router.get("/submit")
 def get_price_by_names(
     country: str = Query(...),
@@ -370,17 +414,21 @@ def get_price_by_names(
                 ).first()
                 description_field = summary_product_obj.sProductOneLineDesc if summary_product_obj else ""
         
-            result.append({
-                "country": country,
-                "category": category,
-                "subcategory": subcategory,
-                "brand": brand,
-                "model": model,
-                "retailer": retailer,
-                "description_type": description_type or "",
-                "description_field": description_field or "",
-                "price": f"${product.price:,.2f}" if product.price else "N/A",
-            })
+            entry = {
+                    "country": country,
+                    "category": category,
+                    "subcategory": subcategory,
+                    "brand": brand,
+                    "model": model,
+                    "retailer": retailer,
+                    "price": f"${product.price:,.2f}" if product.price else "N/A",
+            }
+
+            # Add description_type as dynamic key
+            if description_type and description_field:
+                entry[description_type] = description_field
+
+            result.append(entry)
 
         return result
         
@@ -537,6 +585,7 @@ def get_price_by_names(
                 price_timeline[date_int] = forward_price
 
         # Step 4: Format results
+        result = []
         for date_obj in all_dates:
             date_int = int(date_obj.strftime("%Y%m%d"))
             if date_int in price_timeline:
@@ -552,20 +601,24 @@ def get_price_by_names(
                     ).first() if crawling_product else None
                     final_description = summary_product_obj.sProductOneLineDesc if summary_product_obj else ""
 
-            final_result.append({
-                "country": country,
-                "category": category,
-                "subcategory": subcategory,
-                "brand": brand,
-                "model": model,
-                "retailer": retailer,
-                "description_type": description_type or "",
-                "description_field": final_description or "",
-                "Date": date_obj.strftime("%d-%m-%Y"),
-                "price": f"${price_timeline[date_int]:,.2f}"
-            })
+            entry = {
+                    "country": country,
+                    "category": category,
+                    "subcategory": subcategory,
+                    "brand": brand,
+                    "model": model,
+                    "retailer": retailer,
+                    "Date": date_obj.strftime("%d-%m-%Y"),
+                    "price": f"${price_timeline[date_int]:,.2f}"
+                }
 
-    return final_result
+            # Dynamically insert the description type as a key
+            if description_type and final_description:
+                entry[description_type] = final_description
+
+            result.append(entry)
+
+        return result
 
 @router.get("/export-excel")
 def get_price_by_names(
@@ -914,18 +967,22 @@ def get_price_by_names(
                     ).first() if crawling_product else None
                     final_description = summary_product_obj.sProductOneLineDesc if summary_product_obj else ""
 
-            final_result.append({
-                "country": country,
-                "category": category,
-                "subcategory": subcategory,
-                "brand": brand,
-                "model": model,
-                "retailer": retailer,
-                "description_type": description_type or "",
-                "description_field": final_description or "",
-                "Date": date_obj.strftime("%d-%m-%Y"),
-                "price": f"${price_timeline[date_int]:,.2f}"
-            })
+            entry = {
+                    "country": country,
+                    "category": category,
+                    "subcategory": subcategory,
+                    "brand": brand,
+                    "model": model,
+                    "retailer": retailer,
+                    "Date": date_obj.strftime("%d-%m-%Y"),
+                    "price": f"${price_timeline[date_int]:,.2f}"
+            }
+
+            # Dynamically insert the description type as a key
+            if description_type and final_description:
+                entry[description_type] = final_description
+
+            final_result.append(entry)
                 
     start_dt = end_dt = None
 

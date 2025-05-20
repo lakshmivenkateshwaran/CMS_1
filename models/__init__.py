@@ -27,3 +27,7 @@ from .price_model import Price
 from .product_model import Product
 from .sales_model import SalesData
 from .sub_category_model import SubCategory
+from .cms_parametermap import MSTParameterMap
+from .cms_reporttypes import MSTClientReportType
+from .cms_city import City
+from .cms_publications import CMSNewspaper
