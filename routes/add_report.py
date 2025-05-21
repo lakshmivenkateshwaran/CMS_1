@@ -53,9 +53,12 @@ from models.cms_description_split import CMSSummaryDescriptionSplit
 from models.cms_description_split_desc_link import CMSSummaryDescriptionSplitDescriptionLink
 from models.cms_description_split_product_link import CMSSummaryDescriptionSplitProductLink
 from models.cms_reporttypes import MSTClientReportType
+from models.cms_reportsubtype import ClientReportSubType
 from models.cms_city import City
 from models.cms_publications import CMSNewspaper
 from models.cms_retailername import CMSRetailer
+from models.cms_condition_summary_product_link import SummaryConditionOfSalesProductsLink
+from models.cms_condition_summary_product_sales import SummaryConditionOfSales
 from security.security import get_current_user_id
 
 
@@ -126,10 +129,33 @@ def get_today_website_crawled_summary(db: Session = Depends(get_db)):
 
     return results
 
+# Graph dropdown
+@router.get("/dropdown/graphtypes")
+def get_graph_types(db: Session = Depends(get_db)):
+    graph_types = db.query(ChartType).all()
+    return [{"id": g.id, "name": g.name, "code": g.code} for g in graph_types]
+
 # Report Types
 @router.get("/dropdown/report-types", response_model=List[ReportTypeOut])
 def get_report_types(db: Session = Depends(get_db)):
     return db.query(MSTClientReportType).all()
+
+# Data Types
+@router.get("/dropdown/datatype")
+def get_data_types():
+    return [
+        {"id": 1, "name": "Online"},
+        {"id": 2, "name": "Offline"}
+    ]
+
+# Report Subtypes Dropdown
+@router.get("/dropdown/report-subtypes")
+def get_report_subtypes(type_id: int, db: Session = Depends(get_db)):
+    sub_types = db.query(ClientReportSubType)\
+                  .filter(ClientReportSubType.typeId == type_id)\
+                  .all()
+
+    return [{"id": s.id, "name": s.name, "code": s.code} for s in sub_types]
 
 # Country Dropdown
 @router.get("/dropdown/countries")
@@ -246,6 +272,28 @@ def get_publications(city_code: int, db: Session = Depends(get_db)):
         }
         for pub in publications
     ]
+
+# Conditions Dropdown
+@router.get("/dropdown/conditions")
+def get_conditions(category_id: int, subcategory_id: int, brand_id: int, db: Session = Depends(get_db)):
+    product_links = db.query(SummaryConditionOfSalesProductsLink)\
+        .filter(SummaryConditionOfSalesProductsLink.iProductCatCode == category_id)\
+        .filter(SummaryConditionOfSalesProductsLink.iProductSubCatCode == subcategory_id)\
+        .filter(SummaryConditionOfSalesProductsLink.iProductBrandCode == brand_id)\
+        .all()
+
+    sale_ids = list({link.saleId for link in product_links})
+
+    if not sale_ids:
+        return []
+
+    conditions = db.query(SummaryConditionOfSales)\
+        .filter(SummaryConditionOfSales.id.in_(sale_ids))\
+        .filter(SummaryConditionOfSales.deleted == 0)\
+        .distinct().all()
+
+    # Return the final condition dropdown
+    return [{"id": cond.id, "name": cond.name} for cond in conditions]
 
 # Submit endpoint
 @router.get("/submit")

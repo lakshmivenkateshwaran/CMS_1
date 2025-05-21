@@ -31,3 +31,6 @@ from .cms_parametermap import MSTParameterMap
 from .cms_reporttypes import MSTClientReportType
 from .cms_city import City
 from .cms_publications import CMSNewspaper
+from .cms_reportsubtype import ClientReportSubType
+from .cms_condition_summary_product_sales import SummaryConditionOfSales
+from .cms_condition_summary_product_link import SummaryConditionOfSalesProductsLink
